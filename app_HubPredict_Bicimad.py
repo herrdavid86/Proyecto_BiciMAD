@@ -19,6 +19,7 @@ import joblib
 from category_encoders import TargetEncoder
 import lightgbm as lgb
 import requests
+import base64 # Importación necesaria para _get_base64_image
 
 # --- Constantes de ubicación por defecto (Madrid) ---
 LATITUDE_MADRID = 40.4168
@@ -137,6 +138,14 @@ st.markdown("""
             margin-bottom: 1rem;
             border: 1px solid #e0e0e0; /* Un borde sutil para el recuadro */
         }
+
+        /* ESTILOS AÑADIDOS PARA EL ICONO DEL CLIMA */
+        .weather-icon {
+            vertical-align: middle;
+            margin-right: 5px;
+            height: 24px; /* Ajusta el tamaño de los iconos si es necesario */
+            width: 24px;
+        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -151,15 +160,17 @@ st.markdown("""
 # --- Cargar modelos y encoders con caché ---
 @st.cache_resource
 def load_ml_assets():
+    """Carga los modelos de ML y encoders."""
     try:
-        encoder_plug = joblib.load('encoder_plug.pkl')
-        model_plug = joblib.load('model_plug_lgbm.pkl')
-        encoder_unplug = joblib.load('encoder_unplug.pkl')
-        model_unplug = joblib.load('model_unplug_lgbm.pkl')
+        # Asegúrate de que estos archivos .pkl existan en la carpeta 'modelo/'
+        encoder_plug = joblib.load('modelo/encoder_plug.pkl')
+        model_plug = joblib.load('modelo/model_plug_lgbm.pkl')
+        encoder_unplug = joblib.load('modelo/encoder_unplug.pkl')
+        model_unplug = joblib.load('modelo/model_unplug_lgbm.pkl')
         st.success("Modelos y encoders cargados exitosamente.")
         return encoder_plug, model_plug, encoder_unplug, model_unplug
     except FileNotFoundError as e:
-        st.error(f"Error al cargar archivos del modelo. Asegúrate de que 'encoder_plug.pkl', 'model_plug_lgbm.pkl', 'encoder_unplug.pkl', y 'model_unplug_lgbm.pkl' estén en la misma carpeta que la app. Detalle: {e}")
+        st.error(f"Error al cargar archivos del modelo. Asegúrate de que los archivos .pkl estén en la carpeta 'modelo/'. Detalle: {e}")
         st.stop()
     except Exception as e:
         st.error(f"Error inesperado al cargar los activos de ML: {e}")
@@ -196,6 +207,7 @@ def load_stations_data():
 # --- Función mejorada para obtener pronóstico meteorológico para varias horas ---
 @st.cache_data(ttl=3600) # Caché por 1 hora
 def get_future_weather_forecast_for_day(latitude, longitude, target_date):
+    """Obtiene el pronóstico meteorológico por horas para una fecha específica."""
     date_str = target_date.strftime('%Y-%m-%d')
     url = (f"https://api.open-meteo.com/v1/forecast?"
            f"latitude={latitude}&longitude={longitude}&"
@@ -227,38 +239,39 @@ def get_future_weather_forecast_for_day(latitude, longitude, target_date):
         st.error(f"Error al obtener datos de pronóstico del tiempo: {e}")
         return pd.DataFrame()
 
-
 # --- Nueva función de predicción REAL con modelos ---
 @st.cache_data # Caché de predicciones basado en inputs
 def predict_demand_real(station_id, target_date, target_hour, prediction_type,
                         _encoder_plug_model, _model_plug_model,
                         _encoder_unplug_model, _model_unplug_model,
                         weather_data_df):
+    """
+    Realiza la predicción de demanda de enganche o desenganche para una estación
+    y hora específicas, utilizando los modelos entrenados y datos meteorológicos.
+    Retorna la predicción, temperatura y precipitación usadas.
+    """
     
     # 1. Preparar datos de entrada base
-    is_weekend = 1 if target_date.weekday() in [5, 6] else 0
+    is_weekend = 1 if target_date.weekday() in [5, 6] else 0 # 5=Sábado, 6=Domingo
 
     # Obtener clima para la hora específica o la más cercana
     temp = 20.0 # Valor por defecto si no se encuentra nada
     prec = 0.0  # Valor por defecto si no se encuentra nada
     
     if not weather_data_df.empty:
-        # Intentar obtener la hora exacta
-        weather_row = weather_data_df[weather_data_df['hour'] == target_hour]
+        weather_row = weather_forecast_df[weather_forecast_df['hour'] == target_hour]
         
         if not weather_row.empty:
             temp = weather_row['temperature_2m'].iloc[0]
             prec = weather_row['precipitation'].iloc[0]
         else:
             # Si no se encuentra la hora exacta, buscar la más cercana
-            # Calcular la diferencia absoluta de horas
             weather_data_df['hour_diff'] = abs(weather_data_df['hour'] - target_hour)
-            # Encontrar la fila con la mínima diferencia
             closest_weather_row = weather_data_df.loc[weather_data_df['hour_diff'].idxmin()]
             
             temp = closest_weather_row['temperature_2m']
             prec = closest_weather_row['precipitation']
-            st.warning(f"No se encontró pronóstico para la hora {target_hour:02d}:00. Usando el clima de la hora más cercana ({closest_weather_row['hour']:02d}:00).")
+            # st.warning(f"No se encontró pronóstico para la hora {target_hour:02d}:00. Usando el clima de la hora más cercana ({closest_weather_row['hour']:02d}:00).")
     else:
         st.warning("No se pudieron obtener datos del pronóstico del tiempo. Usando valores predeterminados para la predicción.")
 
@@ -267,11 +280,11 @@ def predict_demand_real(station_id, target_date, target_hour, prediction_type,
         'dia': target_date.day,
         'mes': target_date.month,
         'año': target_date.year,
-        'dia_semana': target_date.weekday(),
+        'dia_semana': target_date.weekday(), # 0=Lunes, 6=Domingo
         'hour': target_hour,
         'Valor_Temp': temp,
         'Valor_Prec': prec,
-        'dia_especial': is_weekend
+        'dia_especial': is_weekend # Asumiendo que dia_especial es 1 para fin de semana
     }])
 
     # 2. Definir columnas categóricas para el Target Encoding (6 columnas)
@@ -310,7 +323,7 @@ def predict_demand_real(station_id, target_date, target_hour, prediction_type,
     predicted_count_raw = model.predict(final_input_df)
     predicted_count_rounded = np.round(predicted_count_raw[0])
     
-    return max(0, int(predicted_count_rounded))
+    return max(0, int(predicted_count_rounded)), temp, prec # Retorna también temp y prec
 
 def get_demand_level(demand):
     """Clasificar nivel de demanda (para el color, no para texto en gráfico)"""
@@ -320,6 +333,27 @@ def get_demand_level(demand):
         return "Media", "demand-medium"
     else:
         return "Baja", "demand-low"
+
+@st.cache_data # Cachear las imágenes para no cargarlas cada vez
+def _get_base64_image(image_path):
+    """Carga una imagen y la codifica en base64 para incrustarla en HTML."""
+    try:
+        with open(image_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode()
+    except FileNotFoundError:
+        st.error(f"Error: No se encontró el archivo de imagen en {image_path}. Asegúrate de que la carpeta 'imagenes/' exista y contenga los iconos (ej. 'clima_generico.png').")
+        return "" # Devuelve una cadena vacía o un icono de "no encontrado"
+
+def get_weather_icon_and_value(precipitation, temperature):
+    """Devuelve el HTML del icono de clima genérico junto a los valores numéricos."""
+    icon_path = "imagenes/" # Asegúrate de que esta carpeta exista y contenga los iconos
+    
+    # Icono genérico de clima (puedes usar un sol, una nube, etc.)
+    # Aquí usaré un sol como genérico, pero puedes cambiarlo por una nube si prefieres
+    weather_icon_html = f"<img src='data:image/png;base64,{_get_base64_image(f'{icon_path}clima_generico.png')}' class='weather-icon' title='Clima'>"
+
+    return f"<div>{weather_icon_html} {temperature:.1f}°C / {precipitation:.1f}mm</div>"
+
 
 def find_nearby_stations(user_location, stations_data, radius_km=2):
     """Encontrar estaciones cercanas a la ubicación del usuario"""
@@ -467,7 +501,7 @@ with col1:
 
             _component_func = components.declare_component(
                 "geolocation_component",
-                path="./components",
+                path="./components", # Asegúrate de que el archivo geolocation_component.py esté aquí
             )
 
             location_data = _component_func(key="user_geolocation")
@@ -652,48 +686,51 @@ with col2:
                         st.markdown(f"#### Predicciones de Desenganche para: {selected_station_for_desenganche}")
                         predictions_des = []
                         station_id_des = stations_data[selected_station_for_desenganche]['id']
+
                         for hour in hours_to_predict:
-                            demand = predict_demand_real(
+                            # predict_demand_real ahora retorna también temperatura y precipitación
+                            demand, temp, prec = predict_demand_real(
                                 station_id_des, selected_date, hour, "Desenganche",
                                 encoder_plug, model_plug, encoder_unplug, model_unplug,
                                 weather_forecast_df
                             )
-                            # Eliminamos el nivel de demanda de aquí, solo el valor numérico
+                            
                             predictions_des.append({
                                 'Hora': f"{hour:02d}:00",
-                                'Demanda': demand,
+                                'Predicción Desenganches': demand,
+                                'Clima': get_weather_icon_and_value(prec, temp), # Usamos la nueva función
                                 'Tipo': '🎯 Objetivo' if hour == selected_hour else '📍 Referencia'
                             })
 
                         df_des = pd.DataFrame(predictions_des)
-                        # Eliminar la columna 'Nivel' si existe
-                        if 'Nivel' in df_des.columns:
-                            df_des = df_des.drop(columns=['Nivel'])
-                        st.dataframe(df_des, use_container_width=True, hide_index=True)
+                        
+                        # Columnas a mostrar en la tabla
+                        display_cols_des = ['Hora', 'Predicción Desenganches', 'Clima', 'Tipo']
+                        st.markdown(df_des[display_cols_des].to_html(escape=False, index=False), unsafe_allow_html=True)
 
+
+                        # --- Gráfico (sin cambios significativos aquí en la lógica de datos, solo el título puede cambiar) ---
                         fig_des = go.Figure()
-                        # Nuevos colores BiciMAD
                         color_target_des = '#0047AB' # Azul más oscuro para objetivo
                         color_reference_des = '#ADD8E6' # Azul claro para referencia
-                        colors_des = [color_target_des if p['Tipo'] == '🎯 Objetivo' else color_reference_des for p in predictions_des]
 
+                        # Predicción
                         fig_des.add_trace(go.Bar(
-                            x=[p['Hora'] for p in predictions_des],
-                            y=[p['Demanda'] for p in predictions_des],
-                            marker_color=colors_des,
-                            name='Desenganche',
-                            text=[f"{p['Demanda']}" for p in predictions_des], # Eliminado el texto de Nivel
+                            x=df_des['Hora'],
+                            y=df_des['Predicción Desenganches'],
+                            marker_color=[color_target_des if t == '🎯 Objetivo' else color_reference_des for t in df_des['Tipo']],
+                            name='Predicción',
+                            text=df_des['Predicción Desenganches'],
                             textposition='auto',
-                            textfont=dict(size=14) # Tamaño de fuente ligeramente más grande
+                            textfont=dict(size=14)
                         ))
-
+                        
                         fig_des.update_layout(
                             title=f"Desenganches - {selected_station_for_desenganche}",
                             xaxis_title="Hora",
-                            yaxis_title="Desenganches Estimados",
+                            yaxis_title="Cantidad de Desenganches",
                             height=400
                         )
-
                         st.plotly_chart(fig_des, use_container_width=True)
                     else:
                         st.info("No se seleccionó estación para Desenganche.")
@@ -703,140 +740,114 @@ with col2:
                         st.markdown(f"#### Predicciones de Enganche para: {selected_station_for_enganche}")
                         predictions_eng = []
                         station_id_eng = stations_data[selected_station_for_enganche]['id']
+
                         for hour in hours_to_predict:
-                            demand = predict_demand_real(
+                            # predict_demand_real ahora retorna también temperatura y precipitación
+                            demand, temp, prec = predict_demand_real(
                                 station_id_eng, selected_date, hour, "Enganche",
                                 encoder_plug, model_plug, encoder_unplug, model_unplug,
                                 weather_forecast_df
                             )
-                            # Eliminamos el nivel de demanda de aquí
+                            
                             predictions_eng.append({
                                 'Hora': f"{hour:02d}:00",
-                                'Demanda': demand,
+                                'Predicción Enganches': demand,
+                                'Clima': get_weather_icon_and_value(prec, temp), # Usamos la nueva función
                                 'Tipo': '🎯 Objetivo' if hour == selected_hour else '📍 Referencia'
                             })
 
                         df_eng = pd.DataFrame(predictions_eng)
-                        # Eliminar la columna 'Nivel' si existe
-                        if 'Nivel' in df_eng.columns:
-                            df_eng = df_eng.drop(columns=['Nivel'])
-                        st.dataframe(df_eng, use_container_width=True, hide_index=True)
 
+                        # Columnas a mostrar en la tabla
+                        display_cols_eng = ['Hora', 'Predicción Enganches', 'Clima', 'Tipo']
+                        st.markdown(df_eng[display_cols_eng].to_html(escape=False, index=False), unsafe_allow_html=True)
+
+                        # --- Gráfico (sin cambios significativos aquí) ---
                         fig_eng = go.Figure()
-                        # Nuevos colores BiciMAD para enganche (verde BiciMAD si aplica, o tonos azules)
                         color_target_eng = '#0047AB' # Azul más oscuro para objetivo
                         color_reference_eng = '#87CEEB' # Azul cielo para referencia (o un verde si prefieres)
-                        colors_eng = [color_target_eng if p['Tipo'] == '🎯 Objetivo' else color_reference_eng for p in predictions_eng]
 
+                        # Predicción
                         fig_eng.add_trace(go.Bar(
                             x=[p['Hora'] for p in predictions_eng],
-                            y=[p['Demanda'] for p in predictions_eng],
-                            marker_color=colors_eng,
-                            name='Enganche',
-                            text=[f"{p['Demanda']}" for p in predictions_eng], # Eliminado el texto de Nivel
+                            y=[p['Predicción Enganches'] for p in predictions_eng],
+                            marker_color=[color_target_eng if p['Tipo'] == '🎯 Objetivo' else color_reference_eng for p in predictions_eng],
+                            name='Predicción',
+                            text=[f"{p['Predicción Enganches']}" for p in predictions_eng],
                             textposition='auto',
-                            textfont=dict(size=14) # Tamaño de fuente ligeramente más grande
+                            textfont=dict(size=14)
                         ))
 
                         fig_eng.update_layout(
                             title=f"Enganches - {selected_station_for_enganche}",
                             xaxis_title="Hora",
-                            yaxis_title="Enganches Estimados",
+                            yaxis_title="Cantidad de Enganches",
                             height=400
                         )
-
                         st.plotly_chart(fig_eng, use_container_width=True)
                     else:
                         st.info("No se seleccionó estación para Enganche.")
-
-            else: # Lógica para "Desenganche" o "Enganche" individual
+            else: # Si el tipo de predicción es "Desenganche" o "Enganche" individual
                 if selected_station_single:
-                    st.markdown(f"#### Predicciones de {prediction_type} para: {selected_station_single}")
-                    predictions = []
+                    st.markdown(f"#### Predicciones para: {selected_station_single}")
+                    predictions_single = []
                     station_id_single = stations_data[selected_station_single]['id']
+
                     for hour in hours_to_predict:
-                        demand = predict_demand_real(
+                        # predict_demand_real ahora retorna también temperatura y precipitación
+                        demand, temp, prec = predict_demand_real(
                             station_id_single, selected_date, hour, prediction_type,
                             encoder_plug, model_plug, encoder_unplug, model_unplug,
                             weather_forecast_df
                         )
-                        # Eliminamos el nivel de demanda de aquí
-                        predictions.append({
+                        
+                        predictions_single.append({
                             'Hora': f"{hour:02d}:00",
-                            'Demanda': demand,
+                            f'Predicción {prediction_type}': demand,
+                            'Clima': get_weather_icon_and_value(prec, temp), # Usamos la nueva función
                             'Tipo': '🎯 Objetivo' if hour == selected_hour else '📍 Referencia'
                         })
 
-                    df_results = pd.DataFrame(predictions)
-                    # Eliminar la columna 'Nivel' si existe
-                    if 'Nivel' in df_results.columns:
-                        df_results = df_results.drop(columns=['Nivel'])
-                    st.dataframe(df_results, use_container_width=True, hide_index=True)
-
-                    fig = go.Figure()
+                    df_single = pd.DataFrame(predictions_single)
                     
-                    # Colores unificados de azules BiciMAD
-                    color_target_single = '#0047AB' # Azul más oscuro para objetivo
-                    color_reference_single = '#ADD8E6' # Azul claro para referencia
-                    
-                    if prediction_type == "Enganche":
-                        # Podríamos usar un verde específico de BiciMAD o un azul diferente para distinción visual si se desea
-                        # Por ahora, mantendremos la gama de azules pero puedes cambiarlo a un verde.
-                        # Ejemplo de verde: color_reference_single = '#28a745'
-                        color_reference_single = '#87CEEB' # Otro tono de azul claro para enganche individual
-                    
-                    colors = [color_target_single if p['Tipo'] == '🎯 Objetivo' else color_reference_single for p in predictions]
+                    # Columnas a mostrar en la tabla
+                    display_cols_single = ['Hora', f'Predicción {prediction_type}', 'Clima', 'Tipo']
+                    st.markdown(df_single[display_cols_single].to_html(escape=False, index=False), unsafe_allow_html=True)
 
 
-                    fig.add_trace(go.Bar(
-                        x=[p['Hora'] for p in predictions],
-                        y=[p['Demanda'] for p in predictions],
-                        marker_color=colors,
-                        text=[f"{p['Demanda']}" for p in predictions], # Eliminado el texto de Nivel
+                    # --- Gráfico (sin cambios significativos aquí) ---
+                    fig_single = go.Figure()
+                    # Colores
+                    color_target_single = '#0047AB'
+                    color_reference_single = '#ADD8E6' if prediction_type == "Desenganche" else '#87CEEB'
+
+                    # Predicción
+                    fig_single.add_trace(go.Bar(
+                        x=df_single['Hora'],
+                        y=df_single[f'Predicción {prediction_type}'],
+                        marker_color=[color_target_single if t == '🎯 Objetivo' else color_reference_single for t in df_single['Tipo']],
+                        name='Predicción',
+                        text=df_single[f'Predicción {prediction_type}'],
                         textposition='auto',
-                        textfont=dict(size=14) # Tamaño de fuente ligeramente más grande
+                        textfont=dict(size=14)
                     ))
 
-                    fig.update_layout(
-                        title=f"Predicción de {prediction_type} - {selected_station_single}",
+                    fig_single.update_layout(
+                        title=f"{prediction_type} - {selected_station_single}",
                         xaxis_title="Hora",
-                        yaxis_title=f"{prediction_type}s Estimados",
+                        yaxis_title=f"Cantidad de {prediction_type}s",
                         height=400
                     )
-
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig_single, use_container_width=True)
                 else:
-                    st.info("Selecciona una estación y presiona 'Generar Predicción'.")
+                    st.info("No se seleccionó estación para la predicción.")
 
-    else:
-        st.markdown("""
-        <div style="text-align: center; padding: 3rem; color: #666;">
-            <h3>🔮 Predictor Avanzado</h3>
-            <p>Selecciona una estación y completa los parámetros para generar predicciones.</p>
-            <p><strong>Nuevas funcionalidades:</strong></p>
-            <ul style="text-align: left; max-width: 400px; margin: 0 auto;">
-                <li>Predicción de enganches y desenganches</li>
-                <li>Búsqueda avanzada de estaciones</li>
-                <li>Rango configurable de horas (3, 5 o 7)</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    st.markdown("---")
-    st.markdown("""
-    <div class="powerbi-container">
-        <h4>📊 Informe Interactivo de Power BI</h4>
-        <p>Explora datos adicionales y métricas de rendimiento de BiciMAD.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    components.html(power_bi_embed_code, height=600, scrolling=True)
-
-
-# Footer (sin la sección de "Estado del Sistema" ni "Datos simulados")
+# --- Sección de Power BI (fuera del condicional predict_button para que siempre esté visible) ---
 st.markdown("---")
+st.markdown("### 📊 Dashboard Interactivo (Power BI)")
 st.markdown("""
-<div style="text-align: center; color: #666; padding: 1rem;">
-    <p>🚴‍♂️ Sistema Avanzado de Predicción BiciMAD | Desarrollado con Streamlit</p>
+<div class="powerbi-container">
+    <p>Explora métricas adicionales y tendencias históricas en nuestro dashboard de Power BI.</p>
 </div>
 """, unsafe_allow_html=True)
+components.html(power_bi_embed_code, height=600)
